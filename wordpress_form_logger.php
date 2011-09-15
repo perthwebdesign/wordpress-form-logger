@@ -9,95 +9,158 @@ Last Updated: 13/09/2011
 Author URI: http://www.pwd.net.au
 */
 
-require_once __DIR__.'/silex.phar';
-
-	$app = new Silex\Application(); 
-
-	$app['debug'] = true;
-	$app->register(new Silex\Extension\SessionExtension());
-	$app->register(new Silex\Extension\DoctrineExtension(), array(
-	    'db.options' => array (
-	        'driver'    => 'pdo_mysql',
-	        'host'      => DB_HOST,
-	        'dbname'    => DB_NAME,
-	        'user'      => DB_USER,
-	        'password'  => DB_PASSWORD,
-	    ),
-	    'db.dbal.class_path'    => __DIR__.'/vendor/doctrine-dbal/lib',
-	    'db.common.class_path'  => __DIR__.'/vendor/doctrine-common/lib',
-	));
-	
+	//.. Include Silex library.
+	require_once __DIR__.'/silex.phar';
 	use Symfony\Component\HttpFoundation\Response;
-	
-	
-	//.. display a test form
-	$app->match('/form/', function () use ($app) {
+
+	/**
+	 * 
+	 */
+	class WordpressFormLogger extends Silex\Application {
 		
-		$response = new Response();
+		var $PluginTemplateDirectory = NULL;
+		var $ThemeTemplateDirectory = NULL;
+		var $TemplateFileExtension = ".php";
 		
-		if ( is_null($app['session']->get('user')) ) {
-			$app['session']->set('user', array('uuid' => uniqid()));
+		var $LogTableName = "wordpress_form_logger";
+		
+		function __construct() {
+			parent::__construct();
+			
+			$this->PluginTemplateDirectory = __DIR__ . "/templates/"; 
+			$this->ThemeTemplateDirectory = WP_CONTENT_DIR . "/themes/" . get_template() . "/formtemplates/";
+			
+			$this['debug'] = true;
+			$this->register(new Silex\Extension\SessionExtension());
+			$this->register(new Silex\Extension\DoctrineExtension(), array(
+			    'db.options' => array (
+			        'driver'    => 'pdo_mysql',
+			        'host'      => DB_HOST,
+			        'dbname'    => DB_NAME,
+			        'user'      => DB_USER,
+			        'password'  => DB_PASSWORD,
+			    ),
+			    'db.dbal.class_path'    => __DIR__.'/vendor/doctrine-dbal/lib',
+			    'db.common.class_path'  => __DIR__.'/vendor/doctrine-common/lib',
+			));
 		}
 		
-		$UserSesion = $app['session']->get('user');
+		//.. Set and return unique user session id.
+		function getSetUniqueID() {
+			
+			if ( is_null($this['session']->get('user')) ) {
+				$this['session']->set('user', array('uuid' => uniqid()));
+			}
+			
+			$UserSesion = $this['session']->get('user');
+			return $UserSesion['uuid'];
+		}
+			
+		//.. Checks to see if a template exists, and returns it.
+		function getTemplateFile( $TemplateFilename ) {
+			
+			$TemplateFilename = $TemplateFilename . $this->TemplateFileExtension;
+			
+			if ( file_exists( $this->ThemeTemplateDirectory . $TemplateFilename ) ) {
+				return file_get_contents( $this->ThemeTemplateDirectory . $TemplateFilename );
+			} elseif ( file_exists( $this->PluginTemplateDirectory . $TemplateFilename ) ) {
+				return file_get_contents( $this->PluginTemplateDirectory . $TemplateFilename );
+			} else {
+				return false;
+			};
+		}
 		
-		$html = '<form method="post" action="/saveform/">';
-		$html .= '<input type="text" name="pants" />';
-		$html .= '<input type="text" name="pants1" />';
-		$html .= '<input type="text" name="pants2" />';
-		$html .= '<input type="text" name="pants3" />';
-		$html .= '<input type="submit" />';
-		$html .= '</form>';
+		//.. Save submitted data to the log table.
+		function setSubmittedResults( $FormName ) {
+			
+			$FormData = array( 
+				'session_id' => $this->getSetUniqueID(),
+				'name' => $FormName,
+				'data' => $this->prepareSubmittedData($_REQUEST)
+			);
+			
+			return $this['db']->insert(
+				"wordpress_form_logger",
+				$FormData
+			);
+		}
+
+		//.. Readies the submitted for to be inserted into the log table.		
+		private function prepareSubmittedData( $Data ) {
+			return json_encode( $Data );	
+		}
+	
+		//.. retrives any, already stored data from the log table.	
+		function getSubmittedResults( $FormName, $UserID=null ) {
+			
+			if ( is_null( $UserID ) ) {
+				$UserID = $this->getSetUniqueID();	
+			}
+			
+			$Query = $this['db']->createQueryBuilder();
+			$Query->select("*")
+				->from("$this->LogTableName", "formLogger")
+				->where("formLogger.session_id = '$UserID'")
+				->andwhere("formLogger.name = '$FormName'")
+			;
 		
-		echo $html;
-		die("test");
+			return $Query->execute()->fetch();
+		}
+	}
+	
+
+	$app = new WordpressFormLogger; 
+
+
+	
+	//.. Sorts out which form to present to the user.
+	$app->match('/form/{name}', function (Silex\Application $app, $name) use ($app) {
+	
+		//.. Establish a user id.
+		$UniqueUserId = $app->getSetUniqueID();
+	
+		//.. Retrieve the template file
+		$TemplateHTML = $app->getTemplateFile( $name );
+	
+		echo $TemplateHTML;
+	
 	});
 	
 	//.. write the form results to 
-	$app->match('/saveform/', function () use ($app) {
+	$app->match('/saveform/{name}', function (Silex\Application $app, $name) use ($app) {
 		
-		//.. establish referring form
-		$ReferringFormName = end(
-			explode( "/",
-				trim( $_SERVER['HTTP_REFERER'], "/" )
-			)
-		);
-		
-		$UserSession = $app['session']->get('user');
-		$UUID = $UserSession['uuid'];
+		$ReferringFormName = $name;
 		
 		
 		$Query = $app['db']->createQueryBuilder();
 		$Query->select("*")
-			->from("wordpress_form_logger", "formLogger")
-			->where("formLogger.session_id = '$UUID'")
+			->from("$app->LogTableName", "formLogger")
+			->where("formLogger.session_id = '$app->getSetUniqueID'")
 			->andwhere("formLogger.name = '$ReferringFormName'")
 		;
 		
 		$SubmissionResults = $Query->execute()->fetch();
 
 		if( $SubmissionResults == false ) {
-			$FormData = array( 
-				'session_id' => $UserSession['uuid'],
-				'name' => $ReferringFormName,
-				'data' => json_encode($_REQUEST)
-			);
-			
-			//.. Insert into logger table
-			$app['db']->insert(
-				"wordpress_form_logger",
-				$FormData
-			);
+			$app->setSubmittedResults( $ReferringFormName );
 		}
 	});
+	
+	$app->match('/viewresults/{name}/{userid}', function (Silex\Application $app, $name, $userid) use ($app) {
+			
+		var_dump($app->getSubmittedResults( $name , $userid ));
+	});
 
+	
+
+	var_dump($_SERVER['REQUEST_URI']);
 
 	//.. Very Basic route setup. Only run on http://...../processimages/
-	if (
-		$_SERVER['REQUEST_URI'] == "/saveform/" ||
-		$_SERVER['REQUEST_URI'] == "/form/"
-	)
-	{
+	// if (
+		// $_SERVER['REQUEST_URI'] == "/saveform/" ||
+		// $_SERVER['REQUEST_URI'] == "/form/"
+	// )
+	// {
 		$app->run();
-	}
+	// }
 
